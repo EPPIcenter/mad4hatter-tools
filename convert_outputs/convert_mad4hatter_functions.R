@@ -32,15 +32,11 @@ detect_release_version <- function(input_dir) {
   } else if ("sampleID" %in% allele_cols && "locus" %in% allele_cols && "allele" %in% allele_cols) {
     release_version <- "0.1.8"
     
-    # v0.1.9 / v0.2.0 / v0.2.1: SampleID/Locus/ASV/Allele — distinguish by dada2 folder
+    # v0.1.9 / v0.2.0 / v0.2.1 / v0.2.2: SampleID/Locus/ASV/Allele — distinguish by dada2 folder or allele_by_locus
   } else if ("SampleID" %in% allele_cols && "Locus" %in% allele_cols && "Allele" %in% allele_cols) {
-    release_version <- detect_version_019_020_021(input_dir)
+    release_version <- detect_version_019_020_021_022(input_dir)
     
-    # v0.2.2: SampleID/Locus/ASV but NO Allele column
-  } else if ("SampleID" %in% allele_cols && "Locus" %in% allele_cols && !"Allele" %in% allele_cols) {
-    release_version <- "0.2.2"
-    
-  } else {
+    } else {
     stop(paste(
       "Could not detect release_version from allele_data.txt column names.",
       "Found columns:", paste(allele_cols, collapse = ", ")
@@ -57,11 +53,15 @@ detect_release_version <- function(input_dir) {
 #   v0.1.9: neither dada2_analysis/ nor raw_dada2_output/ present
 #   v0.2.0: has dada2_analysis/
 #   v0.2.1: has raw_dada2_output/
-detect_version_019_020_021 <- function(input_dir) {
+#   v0.2.2: has resmarker_table_by_locus.txt
+detect_version_019_020_021_022 <- function(input_dir) {
   has_dada2_analysis    <- dir.exists(file.path(input_dir, "dada2_analysis"))
   has_raw_dada2_output  <- dir.exists(file.path(input_dir, "raw_dada2_output"))
+  has_resmarker_table_by_locus  <- file.exists(file.path(input_dir, "resistance_marker_module/resmarker_table_by_locus.txt"))
   
-  if (has_dada2_analysis) {
+  if (has_resmarker_table_by_locus){
+    return("0.2.2")
+  }else if (has_dada2_analysis) {
     return("0.2.0")
   } else if (has_raw_dada2_output) {
     return("0.2.1")
@@ -118,7 +118,7 @@ convert_allele_data <- function(input_dir, output_dir, release_version, lookup) 
              pseudocigar_unmasked = NA_character_)
     locus_col <- "locus"
     
-  } else if (release_version %in% c("0.1.9", "0.2.0", "0.2.1")) {
+  } else if (release_version %in% c("0.1.9", "0.2.0", "0.2.1","0.2.2")) {
     df <- df %>%
       dplyr::rename(
         sample_name        = SampleID,
@@ -131,18 +131,7 @@ convert_allele_data <- function(input_dir, output_dir, release_version, lookup) 
              pseudocigar_unmasked = NA_character_)
     locus_col <- "Locus"
     
-  } else if (release_version == "0.2.2") {
-    df <- df %>%
-      dplyr::rename(
-        sample_name        = SampleID,
-        asv                = ASV,
-        reads              = Reads,
-        pseudocigar_masked = PseudoCIGAR
-      ) %>%
-      mutate(asv_masked           = NA_character_,
-             pseudocigar_unmasked = NA_character_)
-    locus_col <- "Locus"
-  }
+  } 
   
   df <- apply_locus_lookup(df, locus_col, lookup)
   
@@ -427,18 +416,29 @@ convert_all_mutations <- function(input_dir, output_dir, release_version, lookup
 }
 
 copy_passthrough_files <- function(input_dir, output_dir, release_version) {
-  # All passthrough dirs go into legacy/ since their contents differ from v1.0.0
-  # Note: v0.2.0 uses dada2_analysis/ instead of raw_dada2_output/
-  passthrough_dirs <- c("quality_report", "run", "raw_dada2_output", "dada2_analysis")
   
+  # quality_report goes into legacy/ as it no longer exists in v1.0.0
   legacy_dir <- file.path(output_dir, "legacy")
+  src <- file.path(input_dir, "quality_report")
+  dst <- file.path(legacy_dir, "quality_report")
+  if (dir.exists(src)) {
+    dir.create(dst, showWarnings = FALSE, recursive = TRUE)
+    rel_paths <- list.files(src, recursive = TRUE)
+    src_files <- file.path(src, rel_paths)
+    for (i in seq_along(rel_paths)) {
+      dest_file <- file.path(dst, rel_paths[i])
+      dir.create(dirname(dest_file), showWarnings = FALSE, recursive = TRUE)
+      file.copy(src_files[i], dest_file)
+    }
+    message("  [COPY -> legacy/] quality_report/")
+  }
   
-  for (d in passthrough_dirs) {
+  # run and raw_dada2_output copied as-is to output root
+  for (d in c("run", "raw_dada2_output")) {
     src <- file.path(input_dir, d)
-    dst <- file.path(legacy_dir, d)
+    dst <- file.path(output_dir, d)
     if (dir.exists(src)) {
       dir.create(dst, showWarnings = FALSE, recursive = TRUE)
-      # Preserve subdirectory structure
       rel_paths <- list.files(src, recursive = TRUE)
       src_files <- file.path(src, rel_paths)
       for (i in seq_along(rel_paths)) {
@@ -446,8 +446,23 @@ copy_passthrough_files <- function(input_dir, output_dir, release_version) {
         dir.create(dirname(dest_file), showWarnings = FALSE, recursive = TRUE)
         file.copy(src_files[i], dest_file)
       }
-      message(sprintf("  [COPY -> legacy/] %s/", d))
+      message(sprintf("  [COPY] %s/", d))
     }
+  }
+  
+  # dada2_analysis/ (v0.2.0 only) renamed to raw_dada2_output/ to match v1.0.0
+  src <- file.path(input_dir, "dada2_analysis")
+  dst <- file.path(output_dir, "raw_dada2_output")
+  if (dir.exists(src)) {
+    dir.create(dst, showWarnings = FALSE, recursive = TRUE)
+    rel_paths <- list.files(src, recursive = TRUE)
+    src_files <- file.path(src, rel_paths)
+    for (i in seq_along(rel_paths)) {
+      dest_file <- file.path(dst, rel_paths[i])
+      dir.create(dirname(dest_file), showWarnings = FALSE, recursive = TRUE)
+      file.copy(src_files[i], dest_file)
+    }
+    message("  [COPY] dada2_analysis/ -> raw_dada2_output/")
   }
 }
 
@@ -563,6 +578,14 @@ convert_mad4hatter <- function(input_dir, output_dir, locus_lookup,
   # --- Validate inputs -------------------------------------------------------
   if (!dir.exists(input_dir))     stop("input_dir does not exist: ", input_dir)
   if (!file.exists(locus_lookup)) stop("locus_lookup file not found: ", locus_lookup)
+  
+  # --- Validate outputs ------------------------------------------------------
+  if (input_dir==output_dir){
+    output_dir = paste0(output_dir,"_converted")
+    message(paste("\033[1mOutput directory had the same name as the input directory, converted data will be saved into:\033[0m",
+                  output_dir)
+    )
+  } 
   
   # --- Detect version --------------------------------------------------------
   if (is.null(release_version)) {
