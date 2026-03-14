@@ -6,7 +6,9 @@ input_dir   = "PATH/TO/DIR"
 output_dir  = "PATH/TO/NEW_DIR"
 
 # SET PATH TO convert_outputs REPO
-pipeline_path = "PATH/TO/mad4hatter"
+pipeline_path = "PATH/TO/convert_outputs"
+
+
 # target_id_conversion_table.tsv WITH ALL TARGETS (PROVIDED)
 locus_lookup = file.path(pipeline_path,"inputs/target_id_conversion_table.tsv")
 # references.fasta WITH ALL TARGETS (PROVIDED)
