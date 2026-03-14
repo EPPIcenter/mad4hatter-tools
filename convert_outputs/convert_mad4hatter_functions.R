@@ -1,12 +1,20 @@
 library(tidyverse)
 
+# =============================================================================
+# convert_mad4hatter_functions.R
+#
+# Converts mad4hatter results to v1.0.0 format.
+# Supported input versions: v0.1.8, v0.1.9, v0.2.0, v0.2.1, v0.2.2
+#
+# Usage: see run_convert.R
+# =============================================================================
+
 # -----------------------------------------------------------------------------
-# release_version DETECTION
+# VERSION DETECTION
 # -----------------------------------------------------------------------------
 
+
 detect_release_version <- function(input_dir) {
-  
-  files <- list.files(input_dir, recursive = TRUE)
   
   # Read allele_data.txt headers to fingerprint release_version
   allele_file <- file.path(input_dir, "allele_data.txt")
@@ -16,17 +24,21 @@ detect_release_version <- function(input_dir) {
   
   allele_cols <- names(read_tsv(allele_file, n_max = 0, show_col_types = FALSE))
   
-  # v0.1.8: lowercase sampleID, lowercase locus, lowercase asv, has 'allele' column
-  if ("sampleID" %in% allele_cols && "locus" %in% allele_cols && "allele" %in% allele_cols) {
+  # v1.0.0: sample_name + target_name
+  if ("sample_name" %in% allele_cols && "target_name" %in% allele_cols) {
+    release_version <- "1.0.0"
+    
+    # v0.1.8: all-lowercase sampleID/locus/asv/allele/pseudo_cigar
+  } else if ("sampleID" %in% allele_cols && "locus" %in% allele_cols && "allele" %in% allele_cols) {
     release_version <- "0.1.8"
     
-    # v0.2.2: uppercase SampleID, uppercase Locus, has PseudoCIGAR (no 'allele')  
-  } else if ("SampleID" %in% allele_cols && "Locus" %in% allele_cols && "PseudoCIGAR" %in% allele_cols) {
-    release_version <- "0.2.2"
+    # v0.1.9 / v0.2.0 / v0.2.1: SampleID/Locus/ASV/Allele — distinguish by dada2 folder
+  } else if ("SampleID" %in% allele_cols && "Locus" %in% allele_cols && "Allele" %in% allele_cols) {
+    release_version <- detect_version_019_020_021(input_dir)
     
-    # v1.0.0: sample_name, target_name, pseudocigar_unmasked
-  } else if ("sample_name" %in% allele_cols && "target_name" %in% allele_cols) {
-    release_version <- "1.0.0"
+    # v0.2.2: SampleID/Locus/ASV but NO Allele column
+  } else if ("SampleID" %in% allele_cols && "Locus" %in% allele_cols && !"Allele" %in% allele_cols) {
+    release_version <- "0.2.2"
     
   } else {
     stop(paste(
@@ -38,6 +50,26 @@ detect_release_version <- function(input_dir) {
   message(sprintf("Detected release_version: %s", release_version))
   return(release_version)
 }
+
+
+# Secondary fingerprinting for v0.1.9 vs v0.2.0 vs v0.2.1
+# These three share identical allele_data.txt headers, distinguished by dada2 folder:
+#   v0.1.9: neither dada2_analysis/ nor raw_dada2_output/ present
+#   v0.2.0: has dada2_analysis/
+#   v0.2.1: has raw_dada2_output/
+detect_version_019_020_021 <- function(input_dir) {
+  has_dada2_analysis    <- dir.exists(file.path(input_dir, "dada2_analysis"))
+  has_raw_dada2_output  <- dir.exists(file.path(input_dir, "raw_dada2_output"))
+  
+  if (has_dada2_analysis) {
+    return("0.2.0")
+  } else if (has_raw_dada2_output) {
+    return("0.2.1")
+  } else {
+    return("0.1.9")
+  }
+}
+
 
 # -----------------------------------------------------------------------------
 # LOCUS LOOKUP HELPER
@@ -78,15 +110,26 @@ convert_allele_data <- function(input_dir, output_dir, release_version, lookup) 
   if (release_version == "0.1.8") {
     df <- df %>%
       dplyr::rename(
-        sample_name      = sampleID,
-        asv              = asv,
-        reads            = reads,
+        sample_name        = sampleID,
         pseudocigar_masked = pseudo_cigar
       ) %>%
-      select(-allele) %>%  # drop allele column
+      select(-allele) %>%
       mutate(asv_masked           = NA_character_,
              pseudocigar_unmasked = NA_character_)
     locus_col <- "locus"
+    
+  } else if (release_version %in% c("0.1.9", "0.2.0", "0.2.1")) {
+    df <- df %>%
+      dplyr::rename(
+        sample_name        = SampleID,
+        asv                = ASV,
+        reads              = Reads,
+        pseudocigar_masked = PseudoCIGAR
+      ) %>%
+      select(-Allele) %>%
+      mutate(asv_masked           = NA_character_,
+             pseudocigar_unmasked = NA_character_)
+    locus_col <- "Locus"
     
   } else if (release_version == "0.2.2") {
     df <- df %>%
@@ -101,11 +144,8 @@ convert_allele_data <- function(input_dir, output_dir, release_version, lookup) 
     locus_col <- "Locus"
   }
   
-  
-  # Apply locus lookup (adds target_name and pool, removes locus column)
   df <- apply_locus_lookup(df, locus_col, lookup)
   
-  # Final column order matching v1.0.0
   df <- df %>%
     select(sample_name, target_name, asv, pseudocigar_unmasked,
            asv_masked, pseudocigar_masked, reads, pool)
@@ -116,26 +156,18 @@ convert_allele_data <- function(input_dir, output_dir, release_version, lookup) 
 }
 
 convert_allele_data_collapsed <- function(allele_data, output_dir) {
-  # Derived from allele_data: group by sample/target/asv_masked/pseudocigar_masked/pool
   df <- allele_data %>%
     group_by(sample_name, target_name, asv_masked, pseudocigar_masked, pool) %>%
-    summarise(reads = sum(reads, na.rm = TRUE), .groups = "drop")
-  
-  # Final column order matching v1.0.0
-  df <- df %>%
-    select(sample_name, target_name,
-           asv_masked, pseudocigar_masked, reads, pool)
+    summarise(reads = sum(reads, na.rm = TRUE), .groups = "drop") %>%
+    select(sample_name, target_name, asv_masked, pseudocigar_masked, reads, pool)
   
   write_tsv(df, file.path(output_dir, "allele_data_collapsed.txt"))
   message("  [OK] allele_data_collapsed.txt")
 }
 
 convert_sample_coverage <- function(input_dir, output_dir, release_version) {
-  f <- file.path(input_dir, "sample_coverage.txt")
-  df <- read_tsv(f, show_col_types = FALSE)
-  
-  # Both v0.1.8 and v0.2.2 have same columns, just need sample_name dplyr::rename
-  df <- df %>%
+  f  <- file.path(input_dir, "sample_coverage.txt")
+  df <- read_tsv(f, show_col_types = FALSE) %>%
     dplyr::rename(sample_name = SampleID,
                   stage       = Stage,
                   reads       = Reads)
@@ -145,15 +177,11 @@ convert_sample_coverage <- function(input_dir, output_dir, release_version) {
 }
 
 convert_amplicon_coverage <- function(input_dir, output_dir, release_version, lookup) {
-  f <- file.path(input_dir, "amplicon_coverage.txt")
-  df <- read_tsv(f, show_col_types = FALSE)
-  
-  # Both old release_versions have same column names
-  df <- df %>%
+  f  <- file.path(input_dir, "amplicon_coverage.txt")
+  df <- read_tsv(f, show_col_types = FALSE) %>%
     dplyr::rename(sample_name = SampleID,
                   reads       = Reads)
   
-  # Apply locus lookup
   df <- apply_locus_lookup(df, "Locus", lookup) %>%
     select(sample_name, target_name, reads, OutputDada2, OutputPostprocessing)
   
@@ -167,28 +195,78 @@ convert_resmarker_table <- function(input_dir, output_dir, release_version, look
   df <- read_tsv(f, show_col_types = FALSE)
   
   if (release_version == "0.1.8") {
+    # No Locus column; has CodonStart — group_by to collapse it out
     df <- df %>%
       dplyr::rename(
-        sample_name  = SampleID,
-        gene_id      = GeneID,
-        gene         = Gene,
-        aa_position  = CodonID,
-        ref_codon    = RefCodon,
-        codon        = Codon,
+        sample_name   = SampleID,
+        gene_id       = GeneID,
+        gene          = Gene,
+        aa_position   = CodonID,
+        ref_codon     = RefCodon,
+        codon         = Codon,
         codon_ref_alt = CodonRefAlt,
-        ref_aa       = RefAA,
-        aa           = AA,
-        aa_ref_alt   = AARefAlt,
-        reads        = Reads
+        ref_aa        = RefAA,
+        aa            = AA,
+        aa_ref_alt    = AARefAlt,
+        reads         = Reads
       ) %>%
-      group_by(sample_name, gene_id, gene, aa_position, ref_codon, codon, codon_ref_alt, ref_aa, aa, aa_ref_alt) %>%  # CodonoStart dropped in later release_versions
-      summarize(reads = sum(reads,na.rm = F),
-                .groups = "drop") %>% 
-      mutate(follows_indel  = NA,
-             codon_masked   = NA,
-             multiple_loci  = NA)
+      group_by(sample_name, gene_id, gene, aa_position, ref_codon, codon,
+               codon_ref_alt, ref_aa, aa, aa_ref_alt) %>%
+      summarize(reads = sum(reads, na.rm = FALSE), .groups = "drop") %>%
+      mutate(follows_indel = NA,
+             codon_masked  = NA,
+             multiple_loci = NA)
+    
+  } else if (release_version == "0.1.9") {
+    # No Locus column; has CodonStart — group_by to collapse it out
+    df <- df %>%
+      dplyr::rename(
+        sample_name   = SampleID,
+        gene_id       = GeneID,
+        gene          = Gene,
+        aa_position   = CodonID,
+        ref_codon     = RefCodon,
+        codon         = Codon,
+        codon_ref_alt = CodonRefAlt,
+        ref_aa        = RefAA,
+        aa            = AA,
+        aa_ref_alt    = AARefAlt,
+        reads         = Reads
+      ) %>%
+      group_by(sample_name, gene_id, gene, aa_position, ref_codon, codon,
+               codon_ref_alt, ref_aa, aa, aa_ref_alt) %>%
+      summarize(reads = sum(reads, na.rm = FALSE), .groups = "drop") %>%
+      mutate(follows_indel = NA,
+             codon_masked  = NA,
+             multiple_loci = NA)
+    
+  } else if (release_version %in% c("0.2.0", "0.2.1")) {
+    # Has Locus column + CodonStart — apply lookup then group_by to collapse CodonStart
+    df <- df %>%
+      dplyr::rename(
+        sample_name   = SampleID,
+        gene_id       = GeneID,
+        gene          = Gene,
+        aa_position   = CodonID,
+        ref_codon     = RefCodon,
+        codon         = Codon,
+        codon_ref_alt = CodonRefAlt,
+        ref_aa        = RefAA,
+        aa            = AA,
+        aa_ref_alt    = AARefAlt,
+        reads         = Reads
+      )
+    df <- apply_locus_lookup(df, "Locus", lookup)
+    df <- df %>%
+      group_by(sample_name, gene_id, gene, aa_position, ref_codon, codon,
+               codon_ref_alt, ref_aa, aa, aa_ref_alt) %>%
+      summarize(reads = sum(reads, na.rm = FALSE), .groups = "drop") %>%
+      mutate(follows_indel = NA,
+             codon_masked  = NA,
+             multiple_loci = NA)
     
   } else if (release_version == "0.2.2") {
+    # No Locus column; no CodonStart; has FollowsIndel/CodonMasked/MultipleLoci
     df <- df %>%
       dplyr::rename(
         sample_name   = SampleID,
@@ -219,36 +297,31 @@ convert_resmarker_table <- function(input_dir, output_dir, release_version, look
 
 convert_resmarker_table_by_locus <- function(input_dir, output_dir, release_version, lookup) {
   f <- file.path(input_dir, "resistance_marker_module", "resmarker_table_by_locus.txt")
-  if (!file.exists(f)) {
-    message(
-      "  [SKIP] resistance_marker_module/resmarker_table_by_locus.txt does not exist - no output will be created"
-    )
-    return(invisible(NULL))
-  }
-  df <- read_tsv(f, show_col_types = FALSE)
   
-  if (release_version == "0.1.8") {
-    # This file doesn't exist in v0.1.8, skip
+  # Only exists in v0.2.2
+  if (!file.exists(f)) {
+    message("  [SKIP] resistance_marker_module/resmarker_table_by_locus.txt — not present in this version")
     return(invisible(NULL))
-  } else if (release_version == "0.2.2") {
-    df <- df %>%
-      dplyr::rename(
-        sample_name   = SampleID,
-        gene_id       = GeneID,
-        gene          = Gene,
-        aa_position   = CodonID,
-        ref_codon     = RefCodon,
-        codon         = Codon,
-        codon_ref_alt = CodonRefAlt,
-        ref_aa        = RefAA,  
-        aa            = AA,
-        aa_ref_alt    = AARefAlt,
-        follows_indel = FollowsIndel,
-        codon_masked  = CodonMasked,
-        reads         = Reads
-      )
-    df <- apply_locus_lookup(df, "Locus", lookup)
   }
+  
+  df <- read_tsv(f, show_col_types = FALSE) %>%
+    dplyr::rename(
+      sample_name   = SampleID,
+      gene_id       = GeneID,
+      gene          = Gene,
+      aa_position   = CodonID,
+      ref_codon     = RefCodon,
+      codon         = Codon,
+      codon_ref_alt = CodonRefAlt,
+      ref_aa        = RefAA,
+      aa            = AA,
+      aa_ref_alt    = AARefAlt,
+      follows_indel = FollowsIndel,
+      codon_masked  = CodonMasked,
+      reads         = Reads
+    )
+  
+  df <- apply_locus_lookup(df, "Locus", lookup)
   
   df <- df %>%
     select(sample_name, gene_id, gene, target_name, aa_position, ref_codon,
@@ -259,10 +332,10 @@ convert_resmarker_table_by_locus <- function(input_dir, output_dir, release_vers
   message("  [OK] resistance_marker_module/resmarker_table_by_locus.txt")
 }
 
+
 convert_resmarker_microhaplotype <- function(input_dir, output_dir, release_version, lookup) {
   
-  # File name differs by release_version
-  if (release_version == "0.1.8") {
+  if (release_version %in% c("0.1.8", "0.1.9", "0.2.0", "0.2.1")) {
     f <- file.path(input_dir, "resistance_marker_module", "resmarker_microhap_table.txt")
   } else {
     f <- file.path(input_dir, "resistance_marker_module", "resmarker_microhaplotype_table.txt")
@@ -271,24 +344,52 @@ convert_resmarker_microhaplotype <- function(input_dir, output_dir, release_vers
   df <- read_tsv(f, show_col_types = FALSE)
   
   if (release_version == "0.1.8") {
-    # MicrohapIndex -> mhap_aa_positions
-    # RefMicrohap   -> ref_mhap
-    # Microhaplotype -> mhap  (note: MicrohapRefAlt and Reads are separate columns)
+    # No Locus column — target_name will be NA
     df <- df %>%
       dplyr::rename(
-        sample_name      = SampleID,
-        gene_id          = GeneID,
-        gene             = Gene,
+        sample_name       = SampleID,
+        gene_id           = GeneID,
+        gene              = Gene,
         mhap_aa_positions = MicrohapIndex,
-        ref_mhap         = RefMicrohap,
-        mhap             = Microhaplotype,
-        mhap_ref_alt     = MicrohapRefAlt,
-        reads            = Reads
+        ref_mhap          = RefMicrohap,
+        mhap              = Microhaplotype,
+        mhap_ref_alt      = MicrohapRefAlt,
+        reads             = Reads
+      ) %>%
+      mutate(target_name = NA_character_)
+    
+  } else if (release_version == "0.1.9") {
+    # No Locus column — target_name will be NA
+    df <- df %>%
+      dplyr::rename(
+        sample_name       = SampleID,
+        gene_id           = GeneID,
+        gene              = Gene,
+        mhap_aa_positions = MicrohapIndex,
+        ref_mhap          = RefMicrohap,
+        mhap              = Microhaplotype,
+        mhap_ref_alt      = MicrohapRefAlt,
+        reads             = Reads
+      ) %>%
+      mutate(target_name = NA_character_)
+    
+  } else if (release_version %in% c("0.2.0", "0.2.1")) {
+    # Has Locus column
+    df <- df %>%
+      dplyr::rename(
+        sample_name       = SampleID,
+        gene_id           = GeneID,
+        gene              = Gene,
+        mhap_aa_positions = MicrohapIndex,
+        ref_mhap          = RefMicrohap,
+        mhap              = Microhaplotype,
+        mhap_ref_alt      = MicrohapRefAlt,
+        reads             = Reads
       )
-    # No Locus column in v0.1.8 microhap table, so target_name will be NA
-    df <- df %>% mutate(target_name = NA_character_)
+    df <- apply_locus_lookup(df, "Locus", lookup)
     
   } else if (release_version == "0.2.2") {
+    # Renamed file and columns
     df <- df %>%
       dplyr::rename(
         sample_name       = SampleID,
@@ -312,35 +413,48 @@ convert_resmarker_microhaplotype <- function(input_dir, output_dir, release_vers
 }
 
 convert_all_mutations <- function(input_dir, output_dir, release_version, lookup) {
-  # Per spec: resmarker_new_mutations.txt (v0.1.8) and all_mutations_table.txt (v0.2.2)
-  # should both be DELETED (not converted) in the output
-  
+  # resmarker_new_mutations.txt (v0.1.8-v0.2.1) and all_mutations_table.txt (v0.2.2)
+  # are intentionally excluded — prior versions were not correct
   old_files <- c(
     file.path(input_dir, "resistance_marker_module", "resmarker_new_mutations.txt"),
     file.path(input_dir, "resistance_marker_module", "all_mutations_table.txt")
   )
   for (f in old_files) {
     if (file.exists(f)) {
-      message(sprintf("  [SKIP] %s — this file is intentionally excluded as versions prior to v1.0.0 were not correct", basename(f)))
+      message(sprintf("  [SKIP] %s — intentionally excluded as versions prior to v1.0.0 were not correct", basename(f)))
     }
   }
 }
 
 copy_passthrough_files <- function(input_dir, output_dir, release_version) {
-  # Files to copy as-is (quality_report, run, raw_dada2_output if present)
-  passthrough_dirs <- c("quality_report", "run", "raw_dada2_output")
+  # All passthrough dirs go into legacy/ since their contents differ from v1.0.0
+  # Note: v0.2.0 uses dada2_analysis/ instead of raw_dada2_output/
+  passthrough_dirs <- c("quality_report", "run", "raw_dada2_output", "dada2_analysis")
+  
+  legacy_dir <- file.path(output_dir, "legacy")
   
   for (d in passthrough_dirs) {
     src <- file.path(input_dir, d)
-    dst <- file.path(output_dir, d)
+    dst <- file.path(legacy_dir, d)
     if (dir.exists(src)) {
       dir.create(dst, showWarnings = FALSE, recursive = TRUE)
-      files <- list.files(src, full.names = TRUE)
-      file.copy(files, dst)
-      message(sprintf("  [COPY] %s/ (passed through unchanged)", d))
+      # Preserve subdirectory structure
+      rel_paths <- list.files(src, recursive = TRUE)
+      src_files <- file.path(src, rel_paths)
+      for (i in seq_along(rel_paths)) {
+        dest_file <- file.path(dst, rel_paths[i])
+        dir.create(dirname(dest_file), showWarnings = FALSE, recursive = TRUE)
+        file.copy(src_files[i], dest_file)
+      }
+      message(sprintf("  [COPY -> legacy/] %s/", d))
     }
   }
 }
+
+
+# -----------------------------------------------------------------------------
+# PANEL INFORMATION
+# -----------------------------------------------------------------------------
 
 create_panel_information <- function(output_dir, amplicon_info, references, resmarker_info) {
   
@@ -379,11 +493,9 @@ create_panel_information <- function(output_dir, amplicon_info, references, resm
   } else {
     fasta_lines <- readLines(references)
     
-    # Find all header lines and extract sequence names (everything after > up to first space)
     header_idx <- which(startsWith(fasta_lines, ">"))
     seq_names  <- sub("^>([^ ]+).*", "\\1", fasta_lines[header_idx])
     
-    # Build per-entry line ranges
     entry_start <- header_idx
     entry_end   <- c(header_idx[-1] - 1, length(fasta_lines))
     
@@ -395,8 +507,7 @@ create_panel_information <- function(output_dir, amplicon_info, references, resm
       ))
     }
     
-    # Keep only entries whose name matches a target in the data
-    keep      <- seq_names %in% targets_in_data
+    keep       <- seq_names %in% targets_in_data
     kept_lines <- unlist(mapply(
       function(s, e) fasta_lines[s:e],
       entry_start[keep], entry_end[keep],
@@ -416,13 +527,11 @@ create_panel_information <- function(output_dir, amplicon_info, references, resm
     if (!file.exists(resmarker_table_path)) {
       message("  [SKIP] panel_information/resmarker_info.tsv — no resmarker_table.txt in output")
     } else {
-      # Keys present in this run's resmarker output
       resmarker_keys <- read_tsv(resmarker_table_path, show_col_types = FALSE) %>%
         distinct(gene_id, gene, aa_position)
       
       df_resmarker <- read_tsv(resmarker_info, show_col_types = FALSE)
       
-      # Warn about any keys in the data that are absent from the reference file
       missing_keys <- anti_join(resmarker_keys, df_resmarker,
                                 by = c("gene_id", "gene", "aa_position"))
       if (nrow(missing_keys) > 0) {
@@ -434,8 +543,8 @@ create_panel_information <- function(output_dir, amplicon_info, references, resm
       
       df_resmarker %>%
         semi_join(resmarker_keys, by = c("gene_id", "gene", "aa_position")) %>%
-        mutate(target_name = NA_character_,
-               codon_start_in_target = NA_character_) %>% 
+        mutate(target_name           = NA_character_,
+               codon_start_in_target = NA_character_) %>%
         write_tsv(file.path(panel_dir, "resmarker_info.tsv"))
       message("  [OK] panel_information/resmarker_info.tsv")
     }
@@ -443,18 +552,19 @@ create_panel_information <- function(output_dir, amplicon_info, references, resm
 }
 
 
-
 # -----------------------------------------------------------------------------
 # MAIN FUNCTION
 # -----------------------------------------------------------------------------
+
 convert_mad4hatter <- function(input_dir, output_dir, locus_lookup,
                                amplicon_info, references, resmarker_info,
                                release_version = NULL) {
+  
   # --- Validate inputs -------------------------------------------------------
-  if (!dir.exists(input_dir))  stop("input_dir does not exist: ", input_dir)
+  if (!dir.exists(input_dir))     stop("input_dir does not exist: ", input_dir)
   if (!file.exists(locus_lookup)) stop("locus_lookup file not found: ", locus_lookup)
   
-  # --- Detect release_version --------------------------------------------------------
+  # --- Detect version --------------------------------------------------------
   if (is.null(release_version)) {
     release_version <- detect_release_version(input_dir)
   } else {
@@ -462,12 +572,14 @@ convert_mad4hatter <- function(input_dir, output_dir, locus_lookup,
   }
   
   if (release_version == "1.0.0") {
-    message("Input already appears to be v1.0.0. No conrelease_version needed.")
+    message("Input already appears to be v1.0.0. No conversion needed.")
     return(invisible(NULL))
   }
   
-  if (!release_version %in% c("0.1.8", "0.2.2")) {
-    stop(sprintf("Unsupported release_version '%s'. Supported: 0.1.8, 0.2.2", release_version))
+  supported <- c("0.1.8", "0.1.9", "0.2.0", "0.2.1", "0.2.2")
+  if (!release_version %in% supported) {
+    stop(sprintf("Unsupported release_version '%s'. Supported: %s",
+                 release_version, paste(supported, collapse = ", ")))
   }
   
   # --- Load lookup -----------------------------------------------------------
@@ -477,14 +589,13 @@ convert_mad4hatter <- function(input_dir, output_dir, locus_lookup,
   if (length(missing_cols) > 0) {
     stop("locus_lookup is missing required columns: ", paste(missing_cols, collapse = ", "))
   }
-  lookup <- lookup %>% 
-    dplyr::rename(target_name = new_name) 
+  lookup <- lookup %>% dplyr::rename(target_name = new_name)
   
   # --- Create output directories ---------------------------------------------
   dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
   dir.create(file.path(output_dir, "resistance_marker_module"), showWarnings = FALSE)
   
-  message(sprintf("\nConverting from v%s → v1.0.0", release_version))
+  message(sprintf("\nConverting from v%s -> v1.0.0", release_version))
   message(sprintf("Input:  %s", input_dir))
   message(sprintf("Output: %s\n", output_dir))
   
@@ -501,7 +612,6 @@ convert_mad4hatter <- function(input_dir, output_dir, locus_lookup,
   
   # --- Create panel_information ----------------------------------------------
   create_panel_information(output_dir, amplicon_info, references, resmarker_info)
-  
   
   message(sprintf("\nDone. Output written to: %s", output_dir))
   invisible(output_dir)
