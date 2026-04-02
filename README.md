@@ -13,8 +13,7 @@ See [`convert_outputs/CONVERSION_NOTES.md`](convert_outputs/CONVERSION_NOTES.md)
 #### Files
 
 - **`run_convert_mad4hatter.R`** — main script to edit and run. Set your input/output paths here and source the functions file.
-- **`run_convert_mad4hatter_local.R`** — same as above, for local path configurations.
-- **`convert_mad4hatter_functions.R`** — all conversion logic. Do not need to edit this.
+- **`convert_mad4hatter_functions.R`** — all conversion functions. Do not need to edit this.
 - **`inputs/`** — reference files required by the converter:
   - `target_id_conversion_table.tsv` — maps old locus names to new `target_name` and `pool`
   - `amplicon_info.tsv` — amplicon panel information for `panel_information/` output
@@ -24,13 +23,6 @@ See [`convert_outputs/CONVERSION_NOTES.md`](convert_outputs/CONVERSION_NOTES.md)
 #### Usage
 
 Edit `run_convert_mad4hatter.R` with your paths and run it from RStudio or the R console. Requires the `tidyverse` package.
-
-```r
-# Minimal example
-input_dir      = "path/to/old/results"
-output_dir     = "path/to/new/results"
-pipeline_path  = "path/to/mad4hatter-tools"
-```
 
 ## Issues
 
